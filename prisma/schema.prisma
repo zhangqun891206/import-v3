@@ -1,0 +1,323 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// 用户与角色
+// ============================================================
+model User {
+  id        String   @id @default(uuid())
+  name      String
+  role      String   // reporter | level1_approver | level2_approver | qc_supervisor | admin
+  warehouse String?  // 所属仓库（多租户隔离字段）
+  disabled  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  submittedTickets     ExceptionTicket[]  @relation("SubmittedBy")
+  level1Approvals      ApprovalRecord[]   @relation("Level1Approver")
+  level2Approvals      ApprovalRecord[]   @relation("Level2Approver")
+  scanRecords          ScanRecord[]       @relation("ScanOperator")
+  compensationRecords  CompensationRecord[] @relation("CompensationOperator")
+
+  @@index([role])
+  @@index([warehouse])
+}
+
+// ============================================================
+// 1. 运单本地快照表
+// ============================================================
+model WaybillSnapshot {
+  id              String   @id @default(uuid())
+  waybillCode     String   @unique // V2 运单号 externalCode
+  storeName       String?
+  receiverName    String?
+  receiverPhone   String?
+  receiverAddress String?
+  totalQuantity   Int      @default(0)
+  skuCount        Int      @default(0)
+  batchId         String?
+  remark          String?  // V2 运单备注
+
+  // V3 数据来源标记
+  dataSource      String   @default("V2_API") // V2_API | CACHED
+  lastSyncAt      DateTime @default(now())    // 最后一次从 V2 同步的时间
+  v2UpdatedAt     DateTime?                  // V2 侧该运单最后更新时间
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tickets  ExceptionTicket[]
+  syncLogs ApiSyncLog[]
+
+  @@index([waybillCode])
+  @@index([lastSyncAt])
+}
+
+// ============================================================
+// 2. 接口同步日志表
+// ============================================================
+model ApiSyncLog {
+  id             String   @id @default(uuid())
+  requestId      String   // 可追踪的 Request ID
+  apiName        String   // 接口名: getWaybillDetail / verifySku / syncOrders / writebackException
+  waybillCode    String?  // 关联运单号
+  requestSummary String?  // 请求参数摘要
+  responseStatus Int      // HTTP 状态码
+  success        Boolean  // 是否成功
+  durationMs     Int      // 耗时(ms)
+  errorMessage   String?  // 错误信息
+  errorType      String?  // 错误类型: NETWORK_TIMEOUT | HTTP_404 | HTTP_500 | AUTH_FAILED
+  isRetry        Boolean  @default(false)
+  retryCount     Int      @default(0)
+
+  createdAt DateTime @default(now())
+
+  waybillSnapshot   WaybillSnapshot? @relation(fields: [waybillSnapshotId], references: [id])
+  waybillSnapshotId String?
+
+  @@index([requestId])
+  @@index([waybillCode])
+  @@index([apiName])
+  @@index([createdAt])
+}
+
+// ============================================================
+// 3. 异常工单表
+// ============================================================
+model ExceptionTicket {
+  id             String   @id @default(uuid())
+  ticketNo       String   @unique // TICKET-YYYYMMDD-XXXXX
+  waybillCode    String   // 关联运单号
+  ticketSource   String   // SCAN_TRIGGER（扫描触发）| MANUAL_REPORT（手工上报）
+  exceptionType  String   // LOST | DAMAGED | REJECTED | TIMEOUT | ADDRESS_ERROR | QC_QUANTITY | QC_DAMAGED | QC_SPEC | QC_LABEL | QC_BATCH
+  exceptionCategory String // LOGISTICS（物流类）| QC（品控类）
+  severity       String   @default("MEDIUM") // LOW | MEDIUM | HIGH | CRITICAL
+  amount         Decimal  @default(0) @db.Decimal(10, 2) // 赔付/追偿金额
+  description    String?  // 异常描述
+  aiSuggestion   String?  // AI 建议类型（标注"AI建议,需人工确认"）
+  aiConfidence   Decimal? @db.Decimal(5, 2) // AI 置信度
+
+  // 状态机字段
+  status         String   @default("PENDING") // PENDING | LEVEL1_APPROVING | LEVEL2_APPROVING | EXECUTING | COMPLETED | CLOSED
+  timesResubmitted Int    @default(0)  // 重新提交次数
+  maxResubmit    Int      @default(3)  // 最大重新提交次数
+
+  // 超时相关
+  statusEnteredAt DateTime @default(now()) // 进入当前状态的时间
+  dueDate        DateTime?                // 超时期限
+  isOverdue      Boolean  @default(false)
+
+  // 版本控制（并发冲突）
+  version        Int      @default(1)
+
+  // 品控快速放行
+  qcFastRelease  Boolean  @default(false)
+  qcReleaseReason String?
+  qcReleaseById  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // 关联
+  waybillSnapshot   WaybillSnapshot?  @relation(fields: [waybillSnapshotId], references: [id])
+  waybillSnapshotId String?
+  submittedBy       User              @relation("SubmittedBy", fields: [submittedById], references: [id])
+  submittedById     String
+
+  approvals         ApprovalRecord[]
+  compensation      CompensationRecord?
+  scanRecords       ScanRecord[]
+
+  @@index([ticketNo])
+  @@index([waybillCode])
+  @@index([status])
+  @@index([submittedById])
+  @@index([exceptionCategory])
+  @@index([createdAt])
+}
+
+// ============================================================
+// 4. 审批记录表
+// ============================================================
+model ApprovalRecord {
+  id            String   @id @default(uuid())
+  ticketId      String
+
+  // 审批人信息
+  approverId    String
+  approverName  String
+  approvalLevel Int      // 1 或 2
+
+  // 审批结果
+  action        String   // APPROVE | REJECT
+  opinion       String?  // 审批意见
+  aiOpinion     String?  // AI 建议审批意见
+  aiBasis       String?  // AI 建议依据（参考了哪些历史记录）
+
+  // 幂等令牌
+  idempotencyKey String  @unique // 基于 ticketId + approverId + action 生成
+
+  createdAt DateTime @default(now())
+
+  ticket        ExceptionTicket @relation(fields: [ticketId], references: [id])
+  approver      User            @relation("Level1Approver", fields: [approverId], references: [id], map: "approval_record_level1_fk")
+  approver2     User            @relation("Level2Approver", fields: [approverId], references: [id], map: "approval_record_level2_fk")
+
+  // 可追溯性：赔付/库存变更可反查到此记录
+  compensationRecord CompensationRecord?
+
+  @@index([ticketId])
+  @@index([approverId])
+  @@index([createdAt])
+}
+
+// ============================================================
+// 5. 赔付记录表
+// ============================================================
+model CompensationRecord {
+  id               String   @id @default(uuid())
+  ticketId         String   @unique // 一个工单最多一条赔付记录
+  approvalRecordId String   @unique // 反查审批记录
+
+  // 赔付方向（核心字段）
+  direction        String   // TO_CUSTOMER（赔付客户）| FROM_SUPPLIER（向供应商追偿）
+  amount           Decimal  @db.Decimal(10, 2)
+
+  // 状态
+  status           String   @default("PENDING") // PENDING | PROCESSING | COMPLETED | CANCELLED
+  paymentMethod    String?  // 对账方式: BANK_TRANSFER | DEDUCT_PAYMENT | CREDIT_NOTE
+  referenceNo      String?  // 对账参考号
+
+  // 品控特有字段
+  supplierName     String?  // 供应商名称
+  deductionReason  String?  // 追偿理由
+  priceDiffAmount  Decimal? @db.Decimal(10, 2) // 降级差价
+
+  operatedById     String
+  operatedAt       DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ticket          ExceptionTicket  @relation(fields: [ticketId], references: [id])
+  approvalRecord  ApprovalRecord   @relation(fields: [approvalRecordId], references: [id])
+  operator        User             @relation("CompensationOperator", fields: [operatedById], references: [id])
+
+  @@index([ticketId])
+  @@index([direction])
+}
+
+// ============================================================
+// 6. 库存表（V3 自有）
+// ============================================================
+model Inventory {
+  id            String   @id @default(uuid())
+  waybillCode   String
+  skuCode       String
+  skuName       String
+  quantity      Int      // 当前库存数量
+  lockedQuantity Int     @default(0) // 品控暂扣数量
+  warehouse     String?
+  unit          String   @default("件")
+
+  // 品控批次状态
+  batchStatus   String   @default("AVAILABLE") // AVAILABLE | QC_HOLD（品控暂扣）| RELEASED | RETURNED | DISPOSED
+  batchNo       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([waybillCode, skuCode, batchNo])
+  @@index([waybillCode])
+  @@index([skuCode])
+  @@index([batchStatus])
+}
+
+// ============================================================
+// 7. 扫描记录表
+// ============================================================
+model ScanRecord {
+  id            String   @id @default(uuid())
+  waybillCode   String
+  skuCode       String
+  batchNo       String?
+
+  // 扫描信息
+  scannedAt     DateTime @default(now())
+  operatorId    String
+  deviceId      String?  // 扫描设备ID
+
+  // 品控判定
+  qcResult      String   // PASS | FAIL
+  qcRuleMatched  String? // 命中的品控规则ID
+  qcRuleName    String?  // 命中规则名称
+  qcDescription String?  // 异常描述
+  qcSeverity    String?  // 严重度: LOW | MEDIUM | HIGH | CRITICAL
+
+  // AI 辅助
+  aiSuggestion  String?  // AI 推荐异常子类型
+  aiConfidence  Decimal? @db.Decimal(5, 2)
+
+  // 批次状态
+  batchStatus   String   @default("SCANNED") // SCANNED | QC_HOLD | RELEASED | FORCE_RELEASED
+
+  // 关联工单（异常时非空）
+  ticketId      String?
+
+  createdAt DateTime @default(now())
+
+  ticket   ExceptionTicket?  @relation(fields: [ticketId], references: [id])
+  operator User              @relation("ScanOperator", fields: [operatorId], references: [id])
+
+  @@index([waybillCode, skuCode])
+  @@index([ticketId])
+  @@index([operatorId])
+  @@index([scannedAt])
+}
+
+// ============================================================
+// 8. 品控规则表
+// ============================================================
+model QcRule {
+  id               String   @id @default(uuid())
+  name             String   // 规则名称
+  ruleType         String   // QUANTITY_DIFF | APPEARANCE_DAMAGE | SPEC_MISMATCH | LABEL_ERROR | BATCH_ABNORMAL
+  description      String?
+
+  // 可配置触发条件
+  thresholdOperator String  // GT（大于）| LT（小于）| EQ（等于）| GTE | LTE | BETWEEN
+  thresholdValue    Decimal @db.Decimal(10, 2) // 阈值
+  thresholdValue2   Decimal? @db.Decimal(10, 2) // 第二个阈值（BETWEEN 时用）
+  thresholdUnit     String  @default("PERCENT") // PERCENT | ABSOLUTE | LEVEL
+
+  // 判定结果配置
+  severity          String  @default("MEDIUM") // LOW | MEDIUM | HIGH | CRITICAL
+  autoCreateTicket  Boolean @default(true)     // 是否自动创建工单
+  autoApprovalLevel String  @default("LEVEL1") // LEVEL1 | LEVEL2 | DIRECT_LEVEL2
+
+  enabled           Boolean @default(true)
+  priority          Int     @default(0)  // 优先级
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ruleType])
+  @@index([enabled])
+}
+
+// ============================================================
+// 配置表：审批分级阈值
+// ============================================================
+model ApprovalConfig {
+  id             String  @id @default(uuid())
+  configKey      String  @unique // level1_threshold | level2_threshold | approval_timeout_hours | qc_hold_timeout_hours | max_resubmit_count
+  configValue    String
+  description    String?
+  updatedAt      DateTime @updatedAt
+}
