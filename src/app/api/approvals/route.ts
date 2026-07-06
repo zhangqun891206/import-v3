@@ -3,6 +3,8 @@ import { prisma } from "@/lib/prisma";
 import { isValidTransition, generateDueDate } from "@/lib/approval-engine";
 import type { TicketStatus } from "@/types";
 
+export const dynamic = "force-dynamic";
+
 // POST /api/approvals - 提交审批
 export async function POST(req: NextRequest) {
   try {
@@ -102,14 +104,14 @@ export async function POST(req: NextRequest) {
           status: newStatus,
           version: { increment: 1 },
           statusEnteredAt: new Date(),
-          dueDate: await generateDueDate(newStatus),
+          dueDate: await generateDueDate(newStatus, tx),
           isOverdue: false,
         },
       });
 
       // 审批通过 → 执行联动（赔付）
       if (newStatus === "EXECUTING") {
-        await handleExecutionLinkage(tx, ticket);
+        await handleExecutionLinkage(tx, ticket, approval.id);
       }
 
       return { approval, ticket: updatedTicket };
@@ -165,7 +167,7 @@ export async function GET(req: NextRequest) {
 }
 
 // 执行联动：根据异常类型生成赔付记录和库存变更
-async function handleExecutionLinkage(tx: any, ticket: any) {
+async function handleExecutionLinkage(tx: any, ticket: any, approvalRecordId: string) {
   const isLogistics = ticket.exceptionCategory === "LOGISTICS";
   const isQc = ticket.exceptionCategory === "QC";
 
@@ -176,7 +178,7 @@ async function handleExecutionLinkage(tx: any, ticket: any) {
     await tx.compensationRecord.create({
       data: {
         ticketId: ticket.id,
-        approvalRecordId: "", // 由审批记录创建时填充
+        approvalRecordId: approvalRecordId,
         direction: isLogistics ? "TO_CUSTOMER" : "FROM_SUPPLIER",
         amount: ticket.amount,
         status: "PENDING",

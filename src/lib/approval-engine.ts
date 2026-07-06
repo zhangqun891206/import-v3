@@ -21,11 +21,15 @@ export function isValidTransition(from: TicketStatus, to: TicketStatus): boolean
   return VALID_TRANSITIONS[from]?.includes(to) ?? false;
 }
 
+type PrismaTx = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
+
 /**
  * 获取审批配置值
+ * @param tx 可选的事务客户端，传入后可在事务内安全调用
  */
-async function getConfig(key: string, defaultValue: string): Promise<string> {
-  const config = await prisma.approvalConfig.findUnique({ where: { configKey: key } });
+async function getConfig(key: string, defaultValue: string, tx?: PrismaTx): Promise<string> {
+  const client = tx || prisma;
+  const config = await client.approvalConfig.findUnique({ where: { configKey: key } });
   return config?.configValue || defaultValue;
 }
 
@@ -40,11 +44,12 @@ export async function requiresLevel2Approval(amount: number): Promise<boolean> {
 
 /**
  * 获取审批超时小时数
+ * @param tx 可选的事务客户端
  */
-export async function getApprovalTimeoutHours(level: 1 | 2): Promise<number> {
+export async function getApprovalTimeoutHours(level: 1 | 2, tx?: PrismaTx): Promise<number> {
   const key = level === 1 ? "approval_timeout_hours" : "level2_approval_timeout_hours";
   const defaultValue = level === 1 ? "24" : "48";
-  return parseInt(await getConfig(key, defaultValue));
+  return parseInt(await getConfig(key, defaultValue, tx));
 }
 
 /**
@@ -137,12 +142,13 @@ export async function checkOverdueTickets(): Promise<{
 
 /**
  * 生成超时期限
+ * @param tx 可选的事务客户端
  */
-export async function generateDueDate(status: TicketStatus): Promise<Date | null> {
+export async function generateDueDate(status: TicketStatus, tx?: PrismaTx): Promise<Date | null> {
   if (status === "PENDING" || status === "LEVEL1_APPROVING" || status === "LEVEL2_APPROVING") {
     const hours = status === "LEVEL2_APPROVING"
-      ? await getApprovalTimeoutHours(2)
-      : await getApprovalTimeoutHours(1);
+      ? await getApprovalTimeoutHours(2, tx)
+      : await getApprovalTimeoutHours(1, tx);
     return new Date(Date.now() + hours * 60 * 60 * 1000);
   }
   return null;
