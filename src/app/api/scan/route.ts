@@ -10,7 +10,7 @@ export async function POST(req: NextRequest) {
     const { waybillCode, skuCode, batchNo, operatorId, scannedQuantity, expectedQuantity, damageLevel } = body;
 
     if (!waybillCode || !skuCode || !operatorId) {
-      return NextResponse.json({ success: false, error: "运单号、SKU编码和操作人不能为空" }, { status: 400 });
+      return NextResponse.json({ success: false, error: "外部编码、SKU编码和操作人不能为空" }, { status: 400 });
     }
 
     // 1. V2 接口校验：SKU 归属

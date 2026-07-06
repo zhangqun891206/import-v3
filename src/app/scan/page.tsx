@@ -12,7 +12,7 @@ export default function ScanPage() {
 
   const handleScan = async () => {
     if (!form.waybillCode || !form.skuCode) {
-      addToast("warning", "请输入运单号和SKU编码");
+      addToast("warning", "请输入外部编码和SKU编码");
       return;
     }
     setLoading(true);
@@ -71,8 +71,8 @@ export default function ScanPage() {
           <h3 className="text-base font-bold text-[var(--color-ink)] mb-4">扫描录入</h3>
           <div className="space-y-4">
             <div>
-              <label className="text-sm font-medium text-[var(--color-ink)] mb-1 block">运单号 *</label>
-              <input className="input" placeholder="输入运单号（如 ORDER-001）" value={form.waybillCode} onChange={(e) => setForm({ ...form, waybillCode: e.target.value })} />
+              <label className="text-sm font-medium text-[var(--color-ink)] mb-1 block">外部编码 *</label>
+              <input className="input" placeholder="输入外部编码（如 ORDER-001）" value={form.waybillCode} onChange={(e) => setForm({ ...form, waybillCode: e.target.value })} />
             </div>
             <div>
               <label className="text-sm font-medium text-[var(--color-ink)] mb-1 block">SKU 编码 *</label>
